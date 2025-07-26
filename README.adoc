@@ -1,0 +1,371 @@
+= QML module introduction
+This article is about QML module, how it is created and how it is done using CMake. Even though you can make use of qMake to do the same, but CMake is more promising in my opinion.
+
+:toc:
+:sectnums:
+
+:imagesdir: assets/images/
+
+== Introduction
+You should declare a QML module using the link:https://doc.qt.io/qt-6/qt-add-qml-module.html[CMake QML Module API] in order to:
+
+* Generate link:https://doc.qt.io/qt-6/qtqml-modules-qmldir.html[qmldir] and link:https://doc.qt.io/qt-6/qtqml-modules-qmldir.html#type-description-files[*.qmltypes files].
+* Register Cpp types annotated with a link:https://doc.qt.io/qt-6/qqmlintegration-h.html#QML_ELEMENT[QML_ELEMENT]
+* Combine QML files and Cpp-based types in the same module.
+* Invoke link:https://doc.qt.io/qt-6/qtquick-deployment.html#ahead-of-time-compilation[qmlcachegen] on all qml files.
+* Use a pre-compiled versions of QML files inside the module.
+* Provide the module both in the physical and in the link:https://doc.qt.io/qt-6/resources.html[resource file system].
+* Create a backing library and an optional plugin. Link the backing library into the application to avoid loading the plugin at run time.
+
+NOTE: All the above actions can also be configured separately. For more information, see link:https://doc.qt.io/qt-6/qt-add-qml-module.html[CMake QML Module API].
+
+== Multiple QML Modules in One Binary
+You can add multiple QML modules into the same binary. Define a CMake target for each module and then link the targets to the executable. If the _extra targets_ are all static libraries, the result will be one binary, which contains multiple QML modules.
+
+TIP: In short you can create an application like this:
+
+image:qml_module_structure.png[]
+
+=== Using the _ExtraModule_ module
+To begin, let's assume `Main.qml` contains an instatiation of `Extra.qml` like so:
+```json
+import ExtraModule
+Extra { ... }
+```
+The `Extra` module has to be a static library so that you can link into the main program. Therefore, state as much in `ExtraModule/CMakeLists.txt`
+```cmake
+qt_add_library(ExtraModule STATIC)
+qt_add_qml_module(ExtraModule
+    URI "ExtraModule"
+    VERSION 1.0
+    QML_FILES
+        ./qml/Extra.qml
+    SOURCES
+        ./src/extrathing.cpp 
+        ./inc/extrathing.hpp
+    RESOURCE_PREFIX /
+)
+```
+This generates two targets: `ExtraModule` for the backing library, and ExtraModulePlugin for the plugin. Being a static library too, the plugin cannot be loaded at runtime.
+
+`myProject/CMakeLists.txt`: You need to specify the QML module that `main.qml` and any types declared in `onething.h` are part of.
+```cmake
+qt_add_executable(main_program main.cpp)
+
+qt_add_qml_module(main_program
+    VERSION 1.0
+    URI myProject
+    QML_FILES
+        main.qml
+    SOURCES
+        onething.cpp onething.h
+
+)
+```
+From there, you add the subdirectory for the extra module:
+```cmake
+add_subdirectory(ExtraModule)
+```
+In order to ensure that this linking of the extra module works correctly, you will need to:
+
+* Define a symbol in the `ExtraModule`
+* Create a reference to the symbol from the main program
+
+==== QML symbols
+QML plugins contain a symbol you can use for this purpose. You can use the link:https://doc.qt.io/qt-6/qqmlengineextensionplugin.html#Q_IMPORT_QML_PLUGIN[Q_IMPORT_QML_PLUGIN] macro to create a reference to this symbol. Add the following code to the `main.cpp`:
+```cpp
+#include <QtQml/QQmlExtensionPlugin>
+
+Q_IMPORT_QML_PLUGIN(ExtraModulePlugin)
+
+int main(int argc, char **argv) {
+    //
+}
+```
+`ExtraModulePlugin` is the name of the generated plugin class. It's composed of the module URI with Plugin appended to it. Then, in the main proram's CMakeLists.txt, link the plugin, not the backing library, into the main program:
+```cmake
+target_link_libraries(main_program PRIVATE extra_moduleplugin)
+```
+== Defining a QML module
+NOTE: Use the link:https://doc.qt.io/qt-6/qt6-port-to-qt-add-qml-module.html[CMake API] in order to define a QML module manually only if you need to use qmake.
+
+A module is defined by a link:https://doc.qt.io/qt-6/qtqml-modules-qmldir.html[module definition qmldir file]. Each module has an associated type namespace, which is the module's identifier. A module can provide QML object types (defined either by QML documents or via a Cpp plugin) and JavaScript resources, and may be imported by clients.
+
+In order to define a module, a developer should gather together the various QML documents, JavaScript resources and Cpp plugins which belong in the module into a single directory, and write an approriate link:https://doc.qt.io/qt-6/qtqml-modules-qmldir.html[module definition qmldir file] which should also be placed into the directory. The directory can then be installed into the link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[QML import path] as a module.
+
+NOTE: That defining a module isn't the only way to share common QML types within a project - a simple link:https://doc.qt.io/qt-6/qtqml-syntax-directoryimports.html[QML document directory import] may also be used for this purpose.
+
+=== Supported QML Modules types
+There are two different types of modules supported by QML:
+
+link:https://doc.qt.io/qt-6/qtqml-modules-identifiedmodules.html[Identified modules]
+link:https://doc.qt.io/qt-6/qtqml-modules-legacymodules.html[Logacy Modules] (deprecated)
+
+Identified modules explicitly define their identifier and are installed into QML import path. Identified modules are more maintainable (due to type versioning) and are provided with type registration guarantees by the QML engine which are not provided to legacy modules. Legacy modules are only supported to allow legacy code to continue to work with the latest version of QML, and should be avoided by clients if possible.
+
+Clients may import a QML module from within QML documents or JavaScript files. Please see the documentation about link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#module-namespace-imports[importing a QML module] for more information about that topic.
+
+=== Providing Types functionality in a Cpp plugin
+An application which has a lot of logic implemented in cpp, or which defines types in Cpp and exposes them to QML, may wish to implement a QML plugin. A QML extension module developer may wish to implement some types in a Cpp plugin (as opposed to defining them via QML documents) to achieve better performance or for greater flexibility.
+
+Every Cpp plugin for QML has an initialization function which is called by the QML engine when it loads the plugin. This initialization function must register any types that the plugin provides, but must not do anything else (for example, instantiating QObjects isn't allowed).
+
+== Versions
+QML has a complex system to assign to components and modules. In most cases you should ignore all of it by:
+
+. Never adding a version to your QML import statements
+. Never specifying any versions in link:https://doc.qt.io/qt-6/qt-add-qml-module.html[qt_add_qml_module]
+. Never using link:https://doc.qt.io/qt-6/qqmlintegration-h.html#QML_ADDED_IN_VERSION[QML_ADDED_IN_VERSION] or link:https://doc.qt.io/qt-6/cmake-source-file-property-qt-qml-source-versions.html[QT_QML_SOURCE_VERSIONS]
+. Never using link:https://doc.qt.io/qt-6/qobject.html#Q_REVISION[Q_REVISION] or the REVISION() attribute present in link:https://doc.qt.io/qt-6/qobject.html#Q_PROPERTY[Q_PROPERTY]
+. Avoiding unqualified access
+. Generously using import namespaces
+
+Versioning is ideally handled outside the language itself. You may, for example, keep separate link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[import paths] for different sets of QML modules. Or you may use a versioning mechanism provided by your operating system to install or uninstall packages with QML modules.
+
+In some cases, Qt's own QML modules may show different behavior, depending on what version is imported. In particular, if a property is added to a QML component, and your code contains unqualified access to another property of the same name, your code will break. In the following example, the code will behave differently depending on the version of Qt, because the link:https://doc.qt.io/qt-6/qml-qtquick-rectangle.html#topLeftRadius-prop[topLeftRadius] property was added in Qt 6.7.
+
+```qml
+import QtQuick
+
+Item {
+    id: root
+
+    // property you want to use
+    property real topLeftRadius: 24
+
+    Rectangle {
+
+        // never mixes up topLeftRadius with unrelated Rectangle's topLeftRadius
+        objectName: "top left radius:" + root.topLeftRadius
+    }
+}
+```
+The solution here is to avoid the unqualified access. link:https://doc.qt.io/qt-6/qtqml-tooling-qmllint.html[qmllint] can be used to find such problems. The following example accesses the property you actually mean in a safe, qualified way:
+```qml
+import QtQuick
+
+Item {
+    id: root
+
+    // property you want to use
+    property real topLeftRadius: 24
+
+    Rectangle {
+
+        // never mixes up topLeftRadius with unrelated Rectangle's topLeftRadius
+        objectName: "top left radius:" + root.topLeftRadius
+    }
+}
+```
+However, you can also avoid the incompatibility by importing a specific version of link:https://doc.qt.io/qt-6/qtquick-module.html[QtQuick]:
+```qml
+// make sure Rectangle has no topLeftRadius property
+import QtQuick 6.6
+
+Item {
+    property real topLeftRadius: 24
+    Rectangle {
+        objectName: "top left radius:" + topLeftRadius
+    }
+}
+```
+Another problem solved by versioning is the fact that QML components imported by different modules may shadown each other. In the following example, if _MyModule_ were to introduce component named _Rectangle_ in a newer version, the _Rectangle_ created by this document would not be a _QQuickRectangle_ anymore, but rather the new _Rectangle_ introduced by *MyModule*
+```qml
+import QtQuick
+import MyModule
+
+Rectangle {
+    // MyModule's Rectangle, not QtQuick's
+}
+```
+A good way to avoid the shadowing would be to import _QtQuick_ and/or _MyModule_ into type namespaces as follows:
+```qml
+import QtQuick as QQ
+import MyModule as MM
+
+QQ.Rectangle {
+   // QtQuick's Rectangle
+}
+```
+Alternatively, if you import _MyModule_ with a fixed version, and the new component receives a correct version tag via link:https://doc.qt.io/qt-6/qqmlintegration-h.html#QML_ADDED_IN_VERSION[QML_ADDED_IN_VERSION] or link:https://doc.qt.io/qt-6/cmake-source-file-property-qt-qml-source-versions.html[QT_QML_SOURCE_VERSIONS], the shadowing is also avoided:
+```qml
+import QtQuick 6.6
+
+// Types introduced after 1.0 are not available, like Rectangle for example
+import MyModule 1.0
+
+Rectangle {
+    // QtQuick's Rectangle
+}
+```
+For this to work, you need to use versions in *MyModule*. There are few things to be aware of.
+
+=== If you add a version, add them everywhere
+You need to add a VERSION attribute to link:https://doc.qt.io/qt-6/qt-add-qml-module.html[qt_add_qml_module]. The version should be the most recent version provided by your module. Older minor versions of the same major version will automatically be registered.
+
+You should add link:https://doc.qt.io/qt-6/qqmlintegration-h.html#QML_ADDED_IN_VERSION[QML_ADDED_IN_VERSION] or link:https://doc.qt.io/qt-6/cmake-source-file-property-qt-qml-source-versions.html[QT_QML_SOURCE_VERSIONS] to every type that was _not_ introduced in version *x*.0 of your module, where *x* is the current major version.
+
+If you forget to add a version tag, the component will be available in all versions, making the versioning ineffective.
+
+However, there is no way to add versions to properties, methods, and signals defined in QML. The only way to version QML documents is to add a new document with separate link:https://doc.qt.io/qt-6/cmake-source-file-property-qt-qml-source-versions.html[QT_QML_SOURCE_VERSIONS] for each change.
+
+=== Version are not transitive
+If a component from your module _A_ imports another module _B_ and instantiates a type from that module as the root element, then, the import version of _B_ is relevant for the properties available from the resulting component, no matter what version of _A_ is imported by a user.
+
+Consider a file _TypeFromA.qml_ with version 2.6 in module A:
+```qml
+import B 2.7
+
+// Exposes TypeFromB 2.7, no matter what version of A is imported
+TypeFromB { }
+```
+Now, consider a user of _TypeFromA_:
+```qml
+import A 2.6
+
+// This is TypeFromB 2.7.
+TypeFromA { }
+```
+NOTE: The user hopes to see version 2.6 but actually gets version 2.7 of the base class _TypeFromB_.
+
+Therefore, in order to be safe, you not only have to duplicate your QML files and give them new versions when you add properties yourself, but also when you bump versions of modules you import.
+
+=== Qualified access does not honor versioning
+Versioning only affects unqualified access to members of a tye or the type itself. In the example with _topLeftRadius_, if you write this. _topLeftRadius_. The property will be resolved if you're using Qt 6.7, even if you import QtQuick 6.6.
+
+=== Versions and revisions
+With link:https://doc.qt.io/qt-6/qqmlintegration-h.html#QML_ADDED_IN_VERSION[QML_ADDED_IN_VERSIONS], and the two-argument variants of link:https://doc.qt.io/qt-6/qobject.html#Q_REVISION[Q_REVISION] and link:https://doc.qt.io/qt-6/qobject.html#Q_PROPERTY[Q_PROPERTY]'s REVISION(),you can only declare versions that are tightly coupled to the link:https://doc.qt.io/qt-6/qmetaobject.html[metaobject's] revision as exposed in link:https://doc.qt.io/qt-6/qmetaproperty.html#revision[QMetaMethod::revision]. This means all the types in your type hierarchy have to follow the same versioning scheme. This includes any types provided by Qt itself that you inherit from.
+
+With link:https://doc.qt.io/qt-6/qqml-h.html#qmlRegisterType[qmlRegisterType] and related functions you can register any mapping between metaobject revisions and type versions. You then need to use the one-argument forms of link:https://doc.qt.io/qt-6/qobject.html#Q_REVISION[Q_REVISION] and the REVISION attribute of link:https://doc.qt.io/qt-6/qobject.html#Q_PROPERTY[Q_PROPERTY]. However, this can become rather complex and confusing and is not recommended.
+
+=== Exporting multiple major versions from the same module
+link:https://doc.qt.io/qt-6/qt-add-qml-module.html[qt_add_qml_module] by default considers the major version given in its VERSION argument, even if the individual types declare other versions in their added specific version via link:https://doc.qt.io/qt-6/cmake-source-file-property-qt-qml-source-versions.html[QT_QML_SOURCE_REVISION] or link:https://doc.qt.io/qt-6/qobject.html#Q_REVISION[Q_REVISION]. If a module is available under more than one version, you also need to decide what versions the individual QML files are available under. To declare further major versions, you can use the PAST_MAJOR_VERSIONS option to qt_add_qml_module as well as the QT_QML_SOURCE_VERSIONS property on individual QML files.
+```qml
+set_source_files_properties(Thing.qml
+    PROPERTIES
+        QT_QML_SOURCE_VERSIONS "1.4;2.0;3.0"
+)
+
+set_source_files_properties(OtherThing.qml
+    PROPERTIES
+        QT_QML_SOURCE_VERSIONS "2.2;3.0"
+)
+
+qt_add_qml_module(my_module
+    URI MyModule
+    VERSION 3.2
+    PAST_MAJOR_VERSIONS
+        1 2
+    QML_FILES
+        Thing.qml
+        OtherThing.qml
+        OneMoreThing.qml
+    SOURCES
+        everything.cpp everything.h
+)
+```
+MyModule is available in major versions 1, 2 and 3. The maximum version available is 3.2. You can import any version 1.x or 2.x with a positive x. For Thing.qml and OtherThing.qml we have added explicit version information. Thing.qml is available from version 1.4 and OtherThing.qml is available from version 2.2. You have to specify the later versions, too, in each _set_source_files_properties()_ because you may remove QML files from a module when bumping the major version. There is no explicit version information for OneMoreThing.qml. This means that OneMoreThing.qml is available in all major versions, from minor version 0.
+
+With this setup, the generated registration code will register the module versions using link:https://doc.qt.io/qt-6/qqml-h.html#qmlRegisterModule[qmlRegisterModule]() for each of the major versions. This way, all versions can be imported.
+
+== Custom Directory Layouts
+The easiest way to structure QML modules is to keep them in directories named by their URIs. For example, a module My.Extra.Module would live in a directory My/Extra/Module relative to the application that uses it. This way, they can easily be found at run time and by any tools.
+
+In more complex projects, this convention can be too limiting. You might for instance want to group all QML modules in one place to avoid polluting the project's root directory. Or you want to reuse a single module in multiple applications. For those cases, QT_QML_OUTPUT_DIRECTORY in combination with RESOURCE_PREFIX and link:https://doc.qt.io/qt-6/qt-add-qml-module.html#import-path[IMPORT_PATH] can be used.
+
+To collect QML modules into a specific output directory, for example a subdirectory "qml" in the build directory link:https://doc.qt.io/qt-6/cmake-variable-qt-qml-output-directory.html[QT_QML_OUTPUT_DIRECTORY], set the following in the top-level CMakeLists.txt:
+```cmake
+set(QT_QML_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml)
+```
+The output directories of QML modules move to the new location. Likewise, the qmllint and qmlcachegen invocations are automatically adapted to use the new output directory as an link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[import path]. Because the new output directory is not part of the default QML import path, you have to add it explicitly at run time, so that the QML modules can be found.
+
+Now, that the physical file system is taken care of, you may still want to move the QML modules into a different place in the resource file system. This is what the RESOURCE_PREFIX option is for. You have to specify it separatly in each link:https://doc.qt.io/qt-6/qt-add-qml-module.html[qt_add_qml_module]. The QML module will then be placed under the specified prefix, with a target path generated from the URI appended. For example, consider the following module:
+```cmake
+qt_add_qml_module(
+    URI My.Great.Module
+    VERSION 1.0
+    RESOURCE_PREFIX /example.com/qml
+    QML_FILES
+        A.qml
+        B.qml
+)
+```
+This will add a directory example.com/qml/My/Great/Module to the resource file system and place the QML module defined above in it. You don't strictly need to add the resource prefix to the QML import path as the module can still be found in the physical file system. However, it generally is a good idea to add the resource prefix to the QML import path because loading from the resource file system is faster than loading from the physical file system for most modules.
+
+If the QML modules are meant to be used in a larger project with multiple import paths, you'll have to do an additional step: Even if you add the import paths at run time, tooling like qmllint does not have access to it, and might fail to find the correct dependencies. Use IMPORT_PATH to tell tooling about the additional paths it has to consider. For example:
+```cmake
+qt_add_qml_module(
+    URI My.Dependent.Module
+    VERSION 1.0
+    QML_FILES
+        C.qml
+    IMPORT_PATH "/some/where/else"
+)
+```
+== Eliminating Run Time File System Access
+If all QML modules are always loaded from the resource file system, you can deploy the application as a single binary.
+
+If policy is set to NEW then the RESOURCE_PREFIX argument for qt_add_qml_module defaults to /qt/qml/, therefore your modules are placed in :/qt/qml/ in the resource file system. This is part of the default link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[QML Import path], but not used by Qt itself. For modules to be used within your application, this is the right place.
+
+If you hav einstead specified a custom _RESOURCE_PREFIX_, you have to add the custom resource prefix to the link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[QML import path]. You can also add multiple resource prefixes:
+
+```cpp
+QQmlEngine qmlEngine;
+qmlEngine.addImportPath(QStringLiteral(":/my/resource/prefix"));
+qmlEngine.addImportPath(QStringLiteral(":/other/resource/prefix"));
+// Use qmlEngine to load the main.qml file.
+```
+This might be necessary when using third party libraries to avoid module name conflicts. Using a custom resource prefix is discouraged in all other cases.
+
+The path _:/qt-project.org/imprts/_ is also part of the default link:https://doc.qt.io/qt-6/qtqml-syntax-imports.html#qml-import-path[QML Import path] for modules that are havily re-used across different projects or Qt versions, _:/qt-project.org/imports/_ is acceptable as resource prefix. Qt's own QML modules are placed there, though. You have to be careful not to overwrite them.
+
+Do not add any unnecessary import paths. The QML engine might find your modules in the wrong place then. This can trigger problems which can only be reproduced in specific environments.
+
+== Integrating custom QML plugins
+If you bundle an link:https://doc.qt.io/qt-6/qquickimageprovider.html[image provider] in the QML module, you need to implement the link:https://doc.qt.io/qt-6/qqmlengineextensionplugin.html#initializeEngine[QQmlEngineExtensionPlugin::initializeEngine]() method. This, in tuen, makes it necessary to write your own plugin. To support this use case, link:https://doc.qt.io/qt-6/qt-add-qml-module.html#no-generate-plugin-source[NO_GENERATE_PLUGIN_SOURCE] can be used.
+
+Let's consider a module that provides its own plugin source:
+```qml
+qt_add_qml_module(imageproviderplugin
+    VERSION 1.0
+    URI "ImageProvider"
+    PLUGIN_TARGET imageproviderplugin
+    NO_PLUGIN_OPTIONAL
+    NO_GENERATE_PLUGIN_SOURCE
+    CLASS_NAME ImageProviderExtensionPlugin
+    QML_FILES
+        AAA.qml
+        BBB.qml
+    SOURCES
+        moretypes.cpp moretypes.h
+        myimageprovider.cpp myimageprovider.h
+        plugin.cpp
+)
+```
+You may declare an image provider in _myimageprovider.h_, like this:
+```cpp
+class MyImageProvider : public QQuickImageProvider
+{
+    [...]
+};
+```
+In _plugin.cpp_, you can then define the _QQmlEngineExtensionPlugin_:
+```cpp
+#include <myimageprovider.h>
+#include <QtQml/qqmlextensionplugin.h>
+
+class ImageProviderExtensionPlugin : public QQmlEngineExtensionPlugin
+{
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID QQmlEngineExtensionInterface_iid)
+public:
+    void initializeEngine(QQmlEngine *engine, const char *uri) final
+    {
+        Q_UNUSED(uri);
+        engine->addImageProvider("myimg", new MyImageProvider);
+    }
+};
+```
+This will make the image provider available. The plugin and the backing library both are in the same CMake target named _imageproviderplugin_. This is done so that the linker foes not drop parts of the module in various scenarios.
+
+As the plugin creates an image provider, it no longer has a trivial initializeEngine function. Therefore, the plugin is no longer optional.
